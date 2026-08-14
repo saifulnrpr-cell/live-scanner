@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+  <meta name="theme-color" content="#111827">
+  <title>Live Barcode Scanner</title>
+  <script src="https://unpkg.com/html5-qrcode" defer></script>
+  <style>
+    *{box-sizing:border-box}
+    body{margin:0;min-height:100vh;font-family:Arial,"Noto Sans Thai",sans-serif;background:#111827;color:#fff}
+    .wrap{width:min(100%,560px);margin:auto;padding:14px}
+    .top{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+    h1{font-size:22px;margin:0}
+    button{border:0;border-radius:14px;padding:12px 16px;font-size:16px;font-weight:700;cursor:pointer}
+    #closeBtn{background:#ef4444;color:#fff;font-size:24px;width:48px;height:48px;padding:0}
+    .reader-wrap{position:relative;overflow:hidden;border-radius:18px;background:#000;min-height:300px;border:2px solid #f97316}
+    #reader{width:100%;min-height:300px}
+    #reader video{width:100%!important;height:auto!important;object-fit:cover;border-radius:16px}
+    .guide{position:absolute;left:10%;right:10%;top:50%;height:110px;transform:translateY(-50%);border:3px solid #f97316;border-radius:12px;pointer-events:none;box-shadow:0 0 0 9999px rgba(0,0,0,.28)}
+    .status{margin-top:12px;padding:12px;border-radius:12px;background:#1f2937;color:#dbeafe;line-height:1.45}
+    .error{background:#7f1d1d;color:#fee2e2}
+    .success{background:#14532d;color:#dcfce7}
+    .actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:12px}
+    .primary{background:#f97316;color:#fff}
+    .secondary{background:#374151;color:#fff}
+    .small{font-size:12px;opacity:.75;margin-top:12px;text-align:center}
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <div class="top">
+      <h1>📷 Live Barcode Scanner</h1>
+      <button id="closeBtn" aria-label="ปิด">×</button>
+    </div>
+
+    <div class="reader-wrap">
+      <div id="reader"></div>
+      <div class="guide"></div>
+    </div>
+
+    <div id="status" class="status">พร้อมเปิดกล้อง</div>
+
+    <div class="actions">
+      <button id="retryBtn" class="primary">📷 เปิดกล้อง</button>
+      <button id="closeBtn2" class="secondary">ปิด Scanner</button>
+    </div>
+
+    <div class="small">
+      จ่อเส้นบาร์โค้ดให้อยู่ในกรอบ ระบบจะอ่านอัตโนมัติเมื่อพบ Barcode
+    </div>
+  </main>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const token = params.get('token') || '';
+
+  let scanner = null;
+  let running = false;
+  let sent = false;
+
+  const statusEl = document.getElementById('status');
+
+  function setStatus(message, type) {
+    statusEl.textContent = message;
+    statusEl.className = 'status ' +
+      (type === 'error' ? 'error' : type === 'success' ? 'success' : '');
+  }
+
+  function send(payload) {
+    if (window.opener && !window.opener.closed) {
+      window.opener.postMessage(payload, '*');
+    }
+  }
+
+  function formats() {
+    const f = window.Html5QrcodeSupportedFormats;
+    if (!f) return undefined;
+    return [
+      f.EAN_13, f.EAN_8, f.UPC_A, f.UPC_E,
+      f.CODE_128, f.CODE_39, f.ITF, f.QR_CODE
+    ].filter(Boolean);
+  }
+
+  async function stopScanner() {
+    if (!scanner || !running) return;
+    running = false;
+    try { await scanner.stop(); } catch (e) {}
+  }
+
+  async function startScanner() {
+    sent = false;
+    await stopScanner();
+
+    if (!window.isSecureContext) {
+      const msg = 'Scanner ต้องเปิดผ่าน HTTPS เท่านั้น';
+      setStatus(msg, 'error');
+      send({type:'scanner-error', token, message:msg});
+      return;
+    }
+
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      const msg = 'เบราว์เซอร์ไม่รองรับ Camera API กรุณาใช้ Chrome หรือ Safari รุ่นปัจจุบัน';
+      setStatus(msg, 'error');
+      send({type:'scanner-error', token, message:msg});
+      return;
+    }
+
+    if (typeof Html5Qrcode === 'undefined') {
+      const msg = 'กำลังโหลดระบบสแกน กรุณารอสักครู่แล้วกดเปิดกล้องใหม่';
+      setStatus(msg, 'error');
+      send({type:'scanner-error', token, message:msg});
+      return;
+    }
+
+    if (!scanner) scanner = new Html5Qrcode('reader');
+
+    const config = {
+      fps: 10,
+      qrbox: {width: 300, height: 120},
+      aspectRatio: 1.7777778
+    };
+
+    const supportedFormats = formats();
+    if (supportedFormats && supportedFormats.length) {
+      config.formatsToSupport = supportedFormats;
+    }
+
+    setStatus('กำลังขอสิทธิ์ใช้กล้อง...');
+
+    try {
+      await scanner.start(
+        {facingMode: {ideal:'environment'}},
+        config,
+        onSuccess,
+        () => {}
+      );
+
+      running = true;
+      setStatus('กล้องพร้อมแล้ว — จ่อบาร์โค้ดให้อยู่ในกรอบได้เลย', 'success');
+      send({type:'scanner-ready', token});
+    } catch (firstError) {
+      console.warn(firstError);
+
+      try {
+        const cameras = await Html5Qrcode.getCameras();
+        if (!cameras || !cameras.length) throw new Error('ไม่พบกล้อง');
+
+        const preferred =
+          cameras.find(c => /back|rear|environment|หลัง/i.test(c.label)) ||
+          cameras[cameras.length - 1];
+
+        await scanner.start(preferred.id, config, onSuccess, () => {});
+
+        running = true;
+        setStatus('กล้องพร้อมแล้ว — จ่อบาร์โค้ดให้อยู่ในกรอบได้เลย', 'success');
+        send({type:'scanner-ready', token});
+      } catch (secondError) {
+        console.error(secondError);
+
+        let msg = 'ไม่สามารถเปิดกล้องได้ กรุณาตรวจสอบสิทธิ์ Camera ของ Chrome';
+        const text = String(secondError || firstError).toLowerCase();
+
+        if (text.includes('notallowed') || text.includes('permission') || text.includes('denied')) {
+          msg = 'เบราว์เซอร์ไม่อนุญาตให้ใช้กล้อง — กด Allow/อนุญาต Camera แล้วลองใหม่';
+        } else if (text.includes('notfound')) {
+          msg = 'ไม่พบกล้องในอุปกรณ์';
+        } else if (text.includes('notreadable')) {
+          msg = 'กล้องอาจกำลังถูกใช้งานโดยแอปอื่น';
+        }
+
+        setStatus(msg, 'error');
+        send({type:'scanner-error', token, message:msg});
+      }
+    }
+  }
+
+  function onSuccess(decodedText) {
+    if (sent) return;
+    const barcode = String(decodedText || '').trim();
+    if (!barcode) return;
+
+    sent = true;
+    setStatus('พบ Barcode: ' + barcode + ' — กำลังส่งกลับระบบ...', 'success');
+
+    send({
+      type:'barcode-scanned',
+      token:token,
+      barcode:barcode
+    });
+
+    stopScanner().finally(() => {
+      setTimeout(() => { try { window.close(); } catch(e) {} }, 250);
+    });
+  }
+
+  document.getElementById('retryBtn').addEventListener('click', startScanner);
+  document.getElementById('closeBtn').addEventListener('click', closeScanner);
+  document.getElementById('closeBtn2').addEventListener('click', closeScanner);
+
+  async function closeScanner() {
+    await stopScanner();
+    try { window.close(); } catch(e) {}
+  }
+
+  window.addEventListener('beforeunload', () => {
+    try { if (scanner && running) scanner.stop(); } catch(e) {}
+  });
+
+  window.addEventListener('load', () => {
+    setStatus('กด “เปิดกล้อง” เพื่อเริ่ม Live Scanner');
+  });
+</script>
+</body>
+</html>
